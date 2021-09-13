@@ -83,3 +83,27 @@ func TestAutoCast(t *testing.T) {
 
 	t.Log(p.Run([]types.INullableVector{types.BuildValue(types.Int, 123)}, nil))
 }
+
+func Test_QuoteSlashQuoteQuote_Rune(t *testing.T) {
+	p, err := expr.Compile("\"\\\"\"", nil, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	t.Log(p.Run(nil, nil))
+}
+
+func Test_SlashSlashSlashSlash_Rune(t *testing.T) {
+	p, err := expr.Compile("length(\"\\\\\\\\\") = $1", []types.BaseType{types.Int}, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	ret, err := p.Run([]types.INullableVector{types.BuildValue(types.Int, 2)}, nil)
+	if err != nil {
+		panic(err)
+	}
+	if types.ToString(ret) != "BoolV[true]" {
+		panic(types.ToString(ret))
+	}
+}

@@ -363,8 +363,7 @@ func unquoteDouble(s string) (string, error) {
 	if s == `""` {
 		return "", nil
 	}
-	return _unquote(strings.ReplaceAll(s, `""`, `"`))
-
+	return _unquote(s)
 }
 
 var ErrSyntax = errors.New("invalid quote syntax")
