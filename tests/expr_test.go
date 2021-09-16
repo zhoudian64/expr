@@ -83,3 +83,11 @@ func TestAutoCast(t *testing.T) {
 
 	t.Log(p.Run([]types.INullableVector{types.BuildValue(types.Int, 123)}, nil))
 }
+
+func TestEscape(t *testing.T) {
+	p, err := expr.Compile(`length('007/张⑦')`, nil, nil)
+	if err != nil {
+		panic(err)
+	}
+	t.Log(p.Run(nil, nil))
+}

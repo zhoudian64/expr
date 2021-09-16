@@ -81,6 +81,8 @@ const (
 	StateDoubleQuote
 	StateRawQuote
 	StateNumber
+
+	StateCStyleEscape
 )
 
 var terminators = map[string]int{
@@ -185,6 +187,15 @@ func (l *Lexer) lex() (token, error) {
 				}, nil
 			}
 			switch s := l.lookAhead(1); {
+			case s == "e" || s == "E":
+				s2 := l.lookAhead(2)
+				if s2 == "e'" || s2 == "E'" {
+					l.state = StateCStyleEscape
+					l.bufStartPos = l.pos
+					l.pos += 2
+					continue
+				}
+				fallthrough
 			case s == "'":
 				l.state = StateQuote
 				l.bufStartPos = l.pos
@@ -217,6 +228,33 @@ func (l *Lexer) lex() (token, error) {
 				}
 			}
 			l.pos++
+		case StateCStyleEscape:
+			switch s := l.lookAhead(1); {
+			case s == "":
+				panic("WTF?")
+			case s == "\\":
+				l.pos += 2
+			case s == "'":
+				switch s2 := l.lookAhead(2); {
+				case s2 == "''":
+					l.pos += 2
+				case s2 == "":
+					l.pos++
+					l.state = StateNone
+					str, err := SQLStyleUnquote(l.s[l.bufStartPos:l.pos])
+					if err != nil {
+						panic(err)
+					}
+					return token{
+						t:   STR,
+						s:   str,
+						pos: l.bufStartPos,
+					}, err
+
+				}
+			default:
+				l.pos++
+			}
 		case StateQuote:
 			switch s := l.lookAhead(1); {
 			case s == "'":
@@ -224,7 +262,7 @@ func (l *Lexer) lex() (token, error) {
 				case s2 == "" || s2[1] != '\'':
 					l.pos++
 					l.state = StateNone
-					str, err := unquote(l.s[l.bufStartPos:l.pos])
+					str, err := SQLStyleUnquote(l.s[l.bufStartPos:l.pos])
 					if err != nil {
 						err = fmt.Errorf("%v: %s", err, l.s[l.bufStartPos:l.pos])
 					}
@@ -371,6 +409,231 @@ var ErrSyntax = errors.New("invalid quote syntax")
 
 func contains(s string, c byte) bool {
 	return strings.IndexByte(s, c) != -1
+}
+
+// SQLStyleUnquote
+// Usage:
+// SQL Style single quote string
+// 'raw string quoted by '' excepted\n' => raw string quoted by ' excepted\n
+// PostgreSQL Style Escape string
+// e'string which needs escape characters like:\t\"' => string which needs escape characters like:	"
+//
+// this Function is kind of fork from strconv.unquote
+// check out https://cs.opensource.google/go/go/+/refs/tags/go1.17.1:src/strconv/quote.go;l=391
+func SQLStyleUnquote(in string) (out string, err error) {
+	inLength := len(in)
+	if inLength < 2 {
+		return "", ErrSyntax
+	}
+
+	firstCharFromIn := in[0]
+	lastCharFromIn := in[inLength-1]
+
+	// last char MUST be '
+	if lastCharFromIn != '\'' {
+		fmt.Printf("We've got a piece of BS")
+		return "", ErrSyntax
+	}
+
+	switch firstCharFromIn {
+	case '\'':
+		// in this case, we only need to replace `''` => `'`
+		fmt.Println(`SQL Style RAW String`)
+
+		// empty string
+		if inLength == 2 {
+			return "", nil
+		}
+
+		// inLength >= 3
+		unquotedString := in[1 : inLength-1]
+		escapedString := strings.ReplaceAll(unquotedString, `''`, `'`)
+		out = escapedString
+		return out, nil
+
+	case 'E', 'e':
+		fmt.Println(`PGSQL Style Escape String`)
+
+		// We've already checked length of input >= 2, [1] is safe.
+		if in[1] != '\'' {
+			goto ErrorInput
+		}
+		// handle `e''` here
+		if inLength < 3 {
+			goto ErrorInput
+		}
+		if inLength == 3 {
+			return "", nil
+		}
+		// inLength >=4
+		unquotedString := in[2 : inLength-1]
+		fmt.Println(unquotedString)
+
+		// strconv validate UTF-8 here
+
+		in = in[2 : len(in)-1]
+		var runeTmp [utf8.UTFMax]byte
+		buf := make([]byte, 0, 3*len(in)/2)
+		for len(in) > 0 {
+			// Kind of MAGIC !
+			c, multibyte, ss, err := UnquoteCharForPGSQLEString(in)
+			if err != nil {
+				return "", err
+			}
+			in = ss
+			if c < utf8.RuneSelf || !multibyte {
+				buf = append(buf, byte(c))
+			} else {
+				n := utf8.EncodeRune(runeTmp[:], c)
+				buf = append(buf, runeTmp[:n]...)
+			}
+		}
+		if len(in) != 0 {
+			return "", ErrSyntax
+		}
+		return string(buf), nil
+
+	default:
+		fmt.Println(`WTF?`)
+	}
+
+ErrorInput:
+	return "", ErrSyntax
+}
+
+// UnquoteCharForPGSQLEString permits \' and '' and disallows unescaped '.
+func UnquoteCharForPGSQLEString(s string) (value rune, multibyte bool, tail string, err error) {
+	// easy cases
+	if len(s) == 0 {
+		err = ErrSyntax
+		return
+	}
+	switch c := s[0]; {
+	case c == '\'':
+		if len(s) == 1 {
+			return
+		}
+		// handle ''
+		if s[1] == '\'' {
+			value = '\''
+			tail = s[2:]
+		} else {
+			err = ErrSyntax
+		}
+		return
+	case c >= utf8.RuneSelf:
+		r, size := utf8.DecodeRuneInString(s)
+		return r, true, s[size:], nil
+	case c != '\\':
+		return rune(s[0]), false, s[1:], nil
+	}
+
+	if len(s) <= 1 {
+		err = ErrSyntax
+		return
+	}
+
+	c := s[1]
+	s = s[2:]
+
+	switch c {
+	case 'a':
+		value = '\a'
+	case 'b':
+		value = '\b'
+	case 'f':
+		value = '\f'
+	case 'n':
+		value = '\n'
+	case 'r':
+		value = '\r'
+	case 't':
+		value = '\t'
+	case 'v':
+		value = '\v'
+	case 'x', 'u', 'U':
+		n := 0
+		switch c {
+		case 'x':
+			n = 2
+		case 'u':
+			n = 4
+		case 'U':
+			n = 8
+		}
+		var v rune
+		if len(s) < n {
+			err = ErrSyntax
+			return
+		}
+		for j := 0; j < n; j++ {
+			x, ok := unhex(s[j])
+			if !ok {
+				err = ErrSyntax
+				return
+			}
+			v = v<<4 | x
+		}
+		s = s[n:]
+		if c == 'x' {
+			// single-byte string, possibly not UTF-8
+			value = v
+			break
+		}
+		if v > utf8.MaxRune {
+			err = ErrSyntax
+			return
+		}
+		value = v
+		multibyte = true
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		v := rune(c) - '0'
+		if len(s) < 2 {
+			err = ErrSyntax
+			return
+		}
+		for j := 0; j < 2; j++ { // one digit already; two more
+			x := rune(s[j]) - '0'
+			if x < 0 || x > 7 {
+				err = ErrSyntax
+				return
+			}
+			v = (v << 3) | x
+		}
+		s = s[2:]
+		if v > 255 {
+			err = ErrSyntax
+			return
+		}
+		value = v
+	case '\\':
+		value = '\\'
+	case '\'', '"':
+		// we've already handled
+		//if c != quote {
+		//	err = ErrSyntax
+		//	return
+		//}
+		value = rune(c)
+	default:
+		err = ErrSyntax
+		return
+	}
+	tail = s
+	return
+}
+
+func unhex(b byte) (v rune, ok bool) {
+	c := rune(b)
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0', true
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10, true
+	case 'A' <= c && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return
 }
 
 func _unquote(s string) (string, error) {
