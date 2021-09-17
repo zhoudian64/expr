@@ -276,8 +276,8 @@ func (l *Lexer) lex() (token, error) {
 				}
 			case s == "":
 				return token{}, errors.New("unexpected EOF, incomplete string")
-			case s == "\\":
-				l.pos += 2
+			//case s == "\\":
+			//l.pos += 2
 			default:
 				l.pos++
 			}

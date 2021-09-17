@@ -91,3 +91,11 @@ func TestEscape(t *testing.T) {
 	}
 	t.Log(p.Run(nil, nil))
 }
+
+func TestEscape_QQQQ(t *testing.T) {
+	p, err := expr.Compile(`'\''''?"'`, nil, nil)
+	if err != nil {
+		panic(err)
+	}
+	t.Log(p.Run(nil, nil))
+}
